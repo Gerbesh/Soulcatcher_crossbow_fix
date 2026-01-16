@@ -19,6 +19,7 @@ namespace SoulcatcherCrossbowFix
         // ---------------- CONFIG ----------------
         private static ConfigEntry<bool> _cfgEnableDamage;
         private static ConfigEntry<bool> _cfgEnableReload;
+        private static ConfigEntry<float> _cfgReloadMinTime;
 
         private static ConfigEntry<bool> _cfgDebug;
         private static ConfigEntry<bool> _cfgDebugDumpWeaponCustomData;
@@ -35,6 +36,12 @@ namespace SoulcatcherCrossbowFix
         private const string DefaultEffectHare = "Hare Soul Power";
         private const string DefaultEffectDverger = "Dverger Soul Power";
 
+        private static StatusEffect _hareStatusEffect;
+        private static StatusEffect _dvergerStatusEffect;
+        private static Sprite _statusIcon;
+        private static float _nextStatusRefreshTime;
+        private const float StatusRefreshInterval = 0.5f;
+
         // ---------------- RUNTIME RESOLVE ----------------
         private static bool _resolved;
         private static MethodInfo _miGetEffectPowerGenericDef;
@@ -49,6 +56,7 @@ namespace SoulcatcherCrossbowFix
             // Mapping: Hare -> DAMAGE, Dverger -> RELOAD
             _cfgEnableDamage = Config.Bind("General", "EnableHareDamageBonus", true, "Enable Hare gem damage bonus for crossbows.");
             _cfgEnableReload = Config.Bind("General", "EnableDvergerReloadBonus", true, "Enable Dverger gem reload time reduction for crossbows.");
+            _cfgReloadMinTime = Config.Bind("General", "MinReloadTime", 0.3f, "Minimum reload time for crossbows when the Dverger gem effect reduces it.");
 
             _cfgEffectNameHare = Config.Bind("Effects", "HareEffectName", DefaultEffectHare, "Jewelcrafting effect name for Hare gem.");
             _cfgEffectNameDverger = Config.Bind("Effects", "DvergerEffectName", DefaultEffectDverger, "Jewelcrafting effect name for Dverger gem.");
@@ -105,6 +113,15 @@ namespace SoulcatcherCrossbowFix
             }
         }
 
+        [HarmonyPatch(typeof(ObjectDB), "Awake")]
+        private static class ObjectDB_Awake_Patch
+        {
+            private static void Postfix(ObjectDB __instance)
+            {
+                EnsureCustomStatusEffects(__instance);
+            }
+        }
+
         // ---------------- PATCH: RELOAD (DVERGER) ----------------
         [HarmonyPatch(typeof(ItemDrop.ItemData), "GetWeaponLoadingTime")]
         private static class ItemData_GetWeaponLoadingTime_Patch
@@ -132,6 +149,12 @@ namespace SoulcatcherCrossbowFix
                     float timeMult = Mathf.Clamp01(1f - (valuePct / 100f));
                     float before = __result;
                     __result *= timeMult;
+
+                    float minReload = Mathf.Max(0f, _cfgReloadMinTime?.Value ?? 0f);
+                    if (minReload > 0f)
+                    {
+                        __result = Mathf.Max(__result, minReload);
+                    }
 
                     DebugLogRate($"[RLD] Applied Dverger. value={valuePct:0.###}% timeMult={timeMult:0.###} loading {before:0.###}->{__result:0.###} weapon={__instance?.m_dropPrefab?.name}");
                     DebugDumpWeaponCustomDataRate(__instance);
@@ -169,6 +192,114 @@ namespace SoulcatcherCrossbowFix
             dmg.m_spirit *= mult;
             dmg.m_chop *= mult;
             dmg.m_pickaxe *= mult;
+        }
+
+        private void Update()
+        {
+            if (Time.time < _nextStatusRefreshTime) return;
+
+            _nextStatusRefreshTime = Time.time + StatusRefreshInterval;
+
+            Player player = Player.m_localPlayer;
+            if (player == null) return;
+
+            ObjectDB db = ObjectDB.instance;
+            if (db != null)
+            {
+                EnsureCustomStatusEffects(db);
+            }
+
+            RefreshStatusEffect(player, _hareStatusEffect, _cfgEffectNameHare?.Value);
+            RefreshStatusEffect(player, _dvergerStatusEffect, _cfgEffectNameDverger?.Value);
+        }
+
+        private static void RefreshStatusEffect(Player player, StatusEffect effect, string effectName)
+        {
+            if (player == null || effect == null) return;
+            if (string.IsNullOrWhiteSpace(effectName)) return;
+
+            SEMan seMan = player.GetSEMan();
+            if (seMan == null) return;
+
+            float valuePct = GetEffectPercent(player, effectName);
+            if (valuePct > 0f)
+            {
+                seMan.AddStatusEffect(effect, resetTime: true);
+            }
+            else
+            {
+                seMan.RemoveStatusEffect(effect.NameHash(), quiet: true);
+            }
+        }
+
+        private static void EnsureCustomStatusEffects(ObjectDB objectDb)
+        {
+            if (objectDb == null) return;
+            if (_hareStatusEffect != null && _dvergerStatusEffect != null) return;
+
+            Sprite icon = FindStatusIcon(objectDb);
+
+            if (_hareStatusEffect == null)
+            {
+                _hareStatusEffect = CreateCustomStatusEffect("SE_SoulcatcherHare", _cfgEffectNameHare?.Value ?? DefaultEffectHare,
+                    "Hare gems now also show their buff icon while increasing crossbow damage.", icon);
+            }
+            if (_dvergerStatusEffect == null)
+            {
+                _dvergerStatusEffect = CreateCustomStatusEffect("SE_SoulcatcherDverger", _cfgEffectNameDverger?.Value ?? DefaultEffectDverger,
+                    "Dverger gems now also show their buff icon while reducing crossbow reload time.", icon);
+            }
+
+            AddStatusEffectToObjectDB(objectDb, _hareStatusEffect);
+            AddStatusEffectToObjectDB(objectDb, _dvergerStatusEffect);
+        }
+
+        private static StatusEffect CreateCustomStatusEffect(string unityName, string displayName, string tooltip, Sprite icon)
+        {
+            StatusEffect statusEffect = ScriptableObject.CreateInstance<StatusEffect>();
+            statusEffect.name = unityName;
+            statusEffect.m_name = displayName ?? unityName;
+            statusEffect.m_tooltip = tooltip ?? statusEffect.m_name;
+            statusEffect.m_icon = icon;
+            statusEffect.m_ttl = 0f;
+            statusEffect.m_startEffects = new EffectList();
+            statusEffect.m_stopEffects = new EffectList();
+            return statusEffect;
+        }
+
+        private static void AddStatusEffectToObjectDB(ObjectDB objectDb, StatusEffect effect)
+        {
+            if (objectDb == null || effect == null) return;
+            if (objectDb.GetStatusEffect(effect.NameHash()) != null) return;
+            objectDb.m_StatusEffects.Add(effect);
+        }
+
+        private static Sprite FindStatusIcon(ObjectDB objectDb)
+        {
+            if (_statusIcon != null) return _statusIcon;
+            if (objectDb == null) return null;
+
+            foreach (var statusEffect in objectDb.m_StatusEffects)
+            {
+                if (statusEffect == null) continue;
+                if (string.Equals(statusEffect.m_name, "Rested", StringComparison.OrdinalIgnoreCase) && statusEffect.m_icon != null)
+                {
+                    _statusIcon = statusEffect.m_icon;
+                    return _statusIcon;
+                }
+            }
+
+            foreach (var statusEffect in objectDb.m_StatusEffects)
+            {
+                if (statusEffect == null) continue;
+                if (statusEffect.m_icon != null)
+                {
+                    _statusIcon = statusEffect.m_icon;
+                    break;
+                }
+            }
+
+            return _statusIcon;
         }
 
         // ---------------- JEWELCRAFTING EFFECT POWER ----------------
