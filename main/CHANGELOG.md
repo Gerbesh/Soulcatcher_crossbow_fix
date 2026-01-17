@@ -4,7 +4,6 @@
 - Compendium's Active Cells entries now expose the current Hare and Dverger boosts so the effects are visible in-game.
 - Tooltips now report the current damage bonus (%) and reload time (seconds + % faster).
 - Added a `MinReloadTime` config setting so you can choose the minimum reload time Dverger can grant.
-- Added `main/SoulcatcherCrossbowFix.Russian.yml` and `main/SoulcatcherCrossbowFix.Polish.yml` so Compendium statuses get RU/PL translations per player feedback.
 
 ## 1.0.0
 - Fixed crossbow damage bonus from **Hare Soul Power**
