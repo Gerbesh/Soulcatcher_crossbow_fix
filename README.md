@@ -47,6 +47,12 @@ This mod is a **PATCH**, not a standalone mod.
 
 ---
 
+## Configuration
+
+Settings live in `SoulcatcherCrossbowFix.cfg` inside your BepInEx `config` folder. Edit the `[General]` section's `MinReloadTime` value (default `0.3`) to pick the lowest reload speed Dverger can grant on crossbows. Increase it to keep reloads above a safe floor or set it to `0` to allow the fastest possible recharge.
+
+---
+
 ## FAQ
 
 ### Q: Does this work on dedicated servers?

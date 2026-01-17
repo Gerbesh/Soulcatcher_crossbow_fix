@@ -1,6 +1,6 @@
 {
   "name": "Soulcatcher_Crossbow_Fix",
-  "version_number": "1.0.0",
+  "version_number": "1.0.1",
   "website_url": "https://github.com/Gerbesh/Soulcatcher_crossbow_fix",
   "description": "Client-side patch for Soulcatcher JC KG Additions: fixes crossbow damage (Hare) and reload speed (Dverger). Will be removed once upstream mod is fixed.",
   "dependencies": [

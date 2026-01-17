@@ -1,80 +1,76 @@
 ﻿using BepInEx;
 using BepInEx.Configuration;
+using BepInEx.Logging;
 using HarmonyLib;
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using UnityEngine;
 
 namespace SoulcatcherCrossbowFix
 {
-    [BepInPlugin("ru.custom.soulcatcher_crossbowfix", "Soulcatcher Crossbow Fix", "1.0.0")]
+    [BepInPlugin("ru.custom.soulcatcher_crossbowfix", "Soulcatcher Crossbow Fix", "1.0.1")]
     [BepInDependency("Soulcatcher", BepInDependency.DependencyFlags.HardDependency)]
     [BepInDependency("org.bepinex.plugins.jewelcrafting", BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
+        private static ManualLogSource Log;
         private Harmony _harmony;
 
         // ---------------- CONFIG ----------------
-        private static ConfigEntry<bool> _cfgEnableDamage;
-        private static ConfigEntry<bool> _cfgEnableReload;
-        private static ConfigEntry<float> _cfgReloadMinTime;
+        private static ConfigEntry<bool> CfgEnableDamage;
+        private static ConfigEntry<bool> CfgEnableReload;
+        private static ConfigEntry<float> CfgReloadMinTime;
 
-        private static ConfigEntry<bool> _cfgDebug;
-        private static ConfigEntry<bool> _cfgDebugDumpWeaponCustomData;
-        private static ConfigEntry<bool> _cfgDebugDumpDiscovery;
-        private static ConfigEntry<float> _cfgDebugMinIntervalSec;
+        private static ConfigEntry<bool> CfgDebug;
+        private static ConfigEntry<bool> CfgDebugDumpWeaponCustomData;
+        private static ConfigEntry<bool> CfgDebugDumpDiscovery;
+        private static ConfigEntry<float> CfgDebugMinIntervalSec;
 
-        private static ConfigEntry<string> _cfgEffectNameHare;
-        private static ConfigEntry<string> _cfgEffectNameDverger;
+        private static ConfigEntry<string> CfgEffectNameHare;
+        private static ConfigEntry<string> CfgEffectNameDverger;
 
-        // rate limit
+        // Rate limit
         private static float _nextLogTime;
 
         // Effect names
         private const string DefaultEffectHare = "Hare Soul Power";
         private const string DefaultEffectDverger = "Dverger Soul Power";
 
-        private static StatusEffect _hareStatusEffect;
-        private static StatusEffect _dvergerStatusEffect;
-        private static Sprite _statusIcon;
-        private static float _nextStatusRefreshTime;
-        private const float StatusRefreshInterval = 0.5f;
-
         // ---------------- RUNTIME RESOLVE ----------------
-        private static bool _resolved;
         private static MethodInfo _miGetEffectPowerGenericDef;
         private static Type _cfgTypeHare;
         private static Type _cfgTypeDverger;
+
+        private static float _nextResolveAttemptTime;
 
         // Reflection for private field
         private static FieldInfo _fiSEMan_m_character;
 
         private void Awake()
         {
-            // Mapping: Hare -> DAMAGE, Dverger -> RELOAD
-            _cfgEnableDamage = Config.Bind("General", "EnableHareDamageBonus", true, "Enable Hare gem damage bonus for crossbows.");
-            _cfgEnableReload = Config.Bind("General", "EnableDvergerReloadBonus", true, "Enable Dverger gem reload time reduction for crossbows.");
-            _cfgReloadMinTime = Config.Bind("General", "MinReloadTime", 0.3f, "Minimum reload time for crossbows when the Dverger gem effect reduces it.");
+            Log = Logger;
 
-            _cfgEffectNameHare = Config.Bind("Effects", "HareEffectName", DefaultEffectHare, "Jewelcrafting effect name for Hare gem.");
-            _cfgEffectNameDverger = Config.Bind("Effects", "DvergerEffectName", DefaultEffectDverger, "Jewelcrafting effect name for Dverger gem.");
+            CfgEnableDamage = Config.Bind("General", "EnableHareDamageBonus", true, "Enable Hare gem damage bonus for crossbows.");
+            CfgEnableReload = Config.Bind("General", "EnableDvergerReloadBonus", true, "Enable Dverger gem reload time reduction for crossbows.");
+            CfgReloadMinTime = Config.Bind("General", "MinReloadTime", 0.3f, "Minimum reload time for crossbows when the Dverger gem effect reduces it.");
 
-            _cfgDebug = Config.Bind("Debug", "DebugEnabled", false, "Enable verbose debug logging.");
-            _cfgDebugDumpWeaponCustomData = Config.Bind("Debug", "DumpWeaponCustomData", false, "Dump current weapon m_customData (spammy).");
-            _cfgDebugDumpDiscovery = Config.Bind("Debug", "DumpDiscovery", true, "Log discovery of GetEffectPower method and config types.");
-            _cfgDebugMinIntervalSec = Config.Bind("Debug", "MinLogIntervalSeconds", 0.50f, "Rate limit for repeated debug logs.");
+            CfgEffectNameHare = Config.Bind("Effects", "HareEffectName", DefaultEffectHare, "Jewelcrafting effect name for Hare gem.");
+            CfgEffectNameDverger = Config.Bind("Effects", "DvergerEffectName", DefaultEffectDverger, "Jewelcrafting effect name for Dverger gem.");
 
-            // Reflection
+            CfgDebug = Config.Bind("Debug", "DebugEnabled", false, "Enable verbose debug logging.");
+            CfgDebugDumpWeaponCustomData = Config.Bind("Debug", "DumpWeaponCustomData", false, "Dump current weapon m_customData (spammy).");
+            CfgDebugDumpDiscovery = Config.Bind("Debug", "DumpDiscovery", true, "Log discovery of GetEffectPower method and config types.");
+            CfgDebugMinIntervalSec = Config.Bind("Debug", "MinLogIntervalSeconds", 0.50f, "Rate limit for repeated debug logs.");
+
             _fiSEMan_m_character = AccessTools.Field(typeof(SEMan), "m_character");
 
-            ResolveJewelcraftingBindings();
+            ResolveJewelcraftingBindings(force: true);
 
             _harmony = new Harmony("ru.custom.soulcatcher_crossbowfix");
             _harmony.PatchAll();
 
-            LogInfo("[Init] Loaded v1.1.4 (Client-side, fixed SEMan private field access)");
+            LogInfo("[Init] Loaded v1.0.1");
         }
 
         // ---------------- PATCH: DAMAGE (HARE) ----------------
@@ -85,18 +81,18 @@ namespace SoulcatcherCrossbowFix
             {
                 try
                 {
-                    if (!_cfgEnableDamage.Value) return;
+                    if (CfgEnableDamage == null || !CfgEnableDamage.Value) return;
 
-                    Character ch = _fiSEMan_m_character?.GetValue(__instance) as Character;
-                    if (ch is not Player player) return;
+                    Character ch = _fiSEMan_m_character != null ? _fiSEMan_m_character.GetValue(__instance) as Character : null;
+                    if (!(ch is Player player)) return;
 
                     ItemDrop.ItemData weapon = player.GetCurrentWeapon();
                     if (!IsCrossbow(weapon)) return;
 
-                    float valuePct = GetEffectPercent(player, _cfgEffectNameHare?.Value);
+                    float valuePct = GetEffectPercent(player, CfgEffectNameHare != null ? CfgEffectNameHare.Value : DefaultEffectHare);
                     if (valuePct <= 0f)
                     {
-                        DebugLogRate($"[DMG] Effect '{_cfgEffectNameHare?.Value}' value=0 (no gem or not applied).");
+                        DebugLogRate("[DMG] Hare value=0 (no gem or not applied).");
                         return;
                     }
 
@@ -113,16 +109,8 @@ namespace SoulcatcherCrossbowFix
             }
         }
 
-        [HarmonyPatch(typeof(ObjectDB), "Awake")]
-        private static class ObjectDB_Awake_Patch
-        {
-            private static void Postfix(ObjectDB __instance)
-            {
-                EnsureCustomStatusEffects(__instance);
-            }
-        }
-
         // ---------------- PATCH: RELOAD (DVERGER) ----------------
+        // Kept as-is by request (tested working).
         [HarmonyPatch(typeof(ItemDrop.ItemData), "GetWeaponLoadingTime")]
         private static class ItemData_GetWeaponLoadingTime_Patch
         {
@@ -130,19 +118,18 @@ namespace SoulcatcherCrossbowFix
             {
                 try
                 {
-                    if (!_cfgEnableReload.Value) return;
+                    if (CfgEnableReload == null || !CfgEnableReload.Value) return;
 
                     Player player = Player.m_localPlayer;
                     if (player == null) return;
 
                     if (!ReferenceEquals(__instance, player.GetCurrentWeapon())) return;
-
                     if (!IsCrossbow(__instance)) return;
 
-                    float valuePct = GetEffectPercent(player, _cfgEffectNameDverger?.Value);
+                    float valuePct = GetEffectPercent(player, CfgEffectNameDverger != null ? CfgEffectNameDverger.Value : DefaultEffectDverger);
                     if (valuePct <= 0f)
                     {
-                        DebugLogRate($"[RLD] Effect '{_cfgEffectNameDverger?.Value}' value=0 (no gem or not applied).");
+                        DebugLogRate("[RLD] Dverger value=0 (no gem or not applied).");
                         return;
                     }
 
@@ -150,7 +137,7 @@ namespace SoulcatcherCrossbowFix
                     float before = __result;
                     __result *= timeMult;
 
-                    float minReload = Mathf.Max(0f, _cfgReloadMinTime?.Value ?? 0f);
+                    float minReload = Mathf.Max(0f, CfgReloadMinTime != null ? CfgReloadMinTime.Value : 0f);
                     if (minReload > 0f)
                     {
                         __result = Mathf.Max(__result, minReload);
@@ -166,11 +153,95 @@ namespace SoulcatcherCrossbowFix
             }
         }
 
+        // ---------------- PATCH: ACTIVE CELLS TOOLTIP NUMBERS ----------------
+        // Injects current % values into the "Active cells" tooltip lines for crossbow reload/damage.
+        // English-only. No custom StatusEffects created.
+        [HarmonyPatch(typeof(StatusEffect), "GetTooltipString")]
+        private static class StatusEffect_GetTooltipString_Patch
+        {
+            private static void Postfix(StatusEffect __instance, ref string __result)
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(__result)) return;
+
+                    // Fast filter: we only touch tooltips that mention crossbows.
+                    if (__result.IndexOf("crossbow", StringComparison.OrdinalIgnoreCase) < 0) return;
+
+                    Player player = Player.m_localPlayer;
+                    if (player == null) return;
+
+                    string hareName = CfgEffectNameHare != null ? CfgEffectNameHare.Value : DefaultEffectHare;
+                    string dverName = CfgEffectNameDverger != null ? CfgEffectNameDverger.Value : DefaultEffectDverger;
+
+                    float harePct = GetEffectPercent(player, hareName);
+                    float dverPct = GetEffectPercent(player, dverName);
+
+                    if (harePct <= 0f && dverPct <= 0f) return;
+
+                    string patched = InjectNumbers(__result, harePct, dverPct);
+                    if (!string.Equals(patched, __result, StringComparison.Ordinal))
+                        __result = patched;
+                }
+                catch (Exception e)
+                {
+                    LogError($"[UI] Active cells tooltip patch failed: {e}");
+                }
+            }
+
+            private static string InjectNumbers(string tooltip, float harePct, float dverPct)
+            {
+                string[] lines = tooltip.Split('\n');
+                bool changed = false;
+
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string line = lines[i];
+                    string t = line.Trim();
+
+                    // Crossbow reload line
+                    if (dverPct > 0f && ContainsAll(t, "crossbow", "reload"))
+                    {
+                        lines[i] = ReplaceKeepIndent(line, $"Crossbow reload time reduced by {dverPct:0.##}%.");
+                        changed = true;
+                        continue;
+                    }
+
+                    // Crossbow damage line (avoid matching the reload line)
+                    if (harePct > 0f && ContainsAll(t, "crossbow", "damage") && t.IndexOf("reload", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        lines[i] = ReplaceKeepIndent(line, $"Crossbow damage increased by {harePct:0.##}%.");
+                        changed = true;
+                        continue;
+                    }
+                }
+
+                return changed ? string.Join("\n", lines) : tooltip;
+            }
+
+            private static bool ContainsAll(string s, params string[] parts)
+            {
+                if (string.IsNullOrEmpty(s) || parts == null || parts.Length == 0) return false;
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    if (s.IndexOf(parts[i], StringComparison.OrdinalIgnoreCase) < 0) return false;
+                }
+                return true;
+            }
+
+            private static string ReplaceKeepIndent(string originalLine, string newText)
+            {
+                if (string.IsNullOrEmpty(originalLine)) return newText;
+                int indent = 0;
+                while (indent < originalLine.Length && char.IsWhiteSpace(originalLine[indent])) indent++;
+                return indent > 0 ? originalLine.Substring(0, indent) + newText : newText;
+            }
+        }
+
         // ---------------- HELPERS ----------------
         private static bool IsCrossbow(ItemDrop.ItemData weapon)
         {
-            if (weapon?.m_shared == null) return false;
-
+            if (weapon == null || weapon.m_shared == null) return false;
             if (weapon.m_shared.m_skillType == Skills.SkillType.Crossbows) return true;
 
             string prefab = weapon.m_dropPrefab ? weapon.m_dropPrefab.name : null;
@@ -194,121 +265,14 @@ namespace SoulcatcherCrossbowFix
             dmg.m_pickaxe *= mult;
         }
 
-        private void Update()
-        {
-            if (Time.time < _nextStatusRefreshTime) return;
-
-            _nextStatusRefreshTime = Time.time + StatusRefreshInterval;
-
-            Player player = Player.m_localPlayer;
-            if (player == null) return;
-
-            ObjectDB db = ObjectDB.instance;
-            if (db != null)
-            {
-                EnsureCustomStatusEffects(db);
-            }
-
-            RefreshStatusEffect(player, _hareStatusEffect, _cfgEffectNameHare?.Value);
-            RefreshStatusEffect(player, _dvergerStatusEffect, _cfgEffectNameDverger?.Value);
-        }
-
-        private static void RefreshStatusEffect(Player player, StatusEffect effect, string effectName)
-        {
-            if (player == null || effect == null) return;
-            if (string.IsNullOrWhiteSpace(effectName)) return;
-
-            SEMan seMan = player.GetSEMan();
-            if (seMan == null) return;
-
-            float valuePct = GetEffectPercent(player, effectName);
-            if (valuePct > 0f)
-            {
-                seMan.AddStatusEffect(effect, resetTime: true);
-            }
-            else
-            {
-                seMan.RemoveStatusEffect(effect.NameHash(), quiet: true);
-            }
-        }
-
-        private static void EnsureCustomStatusEffects(ObjectDB objectDb)
-        {
-            if (objectDb == null) return;
-            if (_hareStatusEffect != null && _dvergerStatusEffect != null) return;
-
-            Sprite icon = FindStatusIcon(objectDb);
-
-            if (_hareStatusEffect == null)
-            {
-                _hareStatusEffect = CreateCustomStatusEffect("SE_SoulcatcherHare", _cfgEffectNameHare?.Value ?? DefaultEffectHare,
-                    "Hare gems now also show their buff icon while increasing crossbow damage.", icon);
-            }
-            if (_dvergerStatusEffect == null)
-            {
-                _dvergerStatusEffect = CreateCustomStatusEffect("SE_SoulcatcherDverger", _cfgEffectNameDverger?.Value ?? DefaultEffectDverger,
-                    "Dverger gems now also show their buff icon while reducing crossbow reload time.", icon);
-            }
-
-            AddStatusEffectToObjectDB(objectDb, _hareStatusEffect);
-            AddStatusEffectToObjectDB(objectDb, _dvergerStatusEffect);
-        }
-
-        private static StatusEffect CreateCustomStatusEffect(string unityName, string displayName, string tooltip, Sprite icon)
-        {
-            StatusEffect statusEffect = ScriptableObject.CreateInstance<StatusEffect>();
-            statusEffect.name = unityName;
-            statusEffect.m_name = displayName ?? unityName;
-            statusEffect.m_tooltip = tooltip ?? statusEffect.m_name;
-            statusEffect.m_icon = icon;
-            statusEffect.m_ttl = 0f;
-            statusEffect.m_startEffects = new EffectList();
-            statusEffect.m_stopEffects = new EffectList();
-            return statusEffect;
-        }
-
-        private static void AddStatusEffectToObjectDB(ObjectDB objectDb, StatusEffect effect)
-        {
-            if (objectDb == null || effect == null) return;
-            if (objectDb.GetStatusEffect(effect.NameHash()) != null) return;
-            objectDb.m_StatusEffects.Add(effect);
-        }
-
-        private static Sprite FindStatusIcon(ObjectDB objectDb)
-        {
-            if (_statusIcon != null) return _statusIcon;
-            if (objectDb == null) return null;
-
-            foreach (var statusEffect in objectDb.m_StatusEffects)
-            {
-                if (statusEffect == null) continue;
-                if (string.Equals(statusEffect.m_name, "Rested", StringComparison.OrdinalIgnoreCase) && statusEffect.m_icon != null)
-                {
-                    _statusIcon = statusEffect.m_icon;
-                    return _statusIcon;
-                }
-            }
-
-            foreach (var statusEffect in objectDb.m_StatusEffects)
-            {
-                if (statusEffect == null) continue;
-                if (statusEffect.m_icon != null)
-                {
-                    _statusIcon = statusEffect.m_icon;
-                    break;
-                }
-            }
-
-            return _statusIcon;
-        }
-
-        // ---------------- JEWELCRAFTING EFFECT POWER ----------------
+        // ---------------- JEWELCRAFTING EFFECT POWER (REFLECTION) ----------------
         private static float GetEffectPercent(Player player, string effectName)
         {
             if (player == null) return 0f;
             if (string.IsNullOrWhiteSpace(effectName)) return 0f;
 
-            ResolveJewelcraftingBindings();
+            ResolveJewelcraftingBindings(force: false);
+
             if (_miGetEffectPowerGenericDef == null)
             {
                 DebugLogRate("[JC] GetEffectPower<T> not resolved.");
@@ -317,9 +281,9 @@ namespace SoulcatcherCrossbowFix
 
             Type cfgType = null;
 
-            if (string.Equals(effectName, _cfgEffectNameHare?.Value, StringComparison.OrdinalIgnoreCase))
+            if (CfgEffectNameHare != null && string.Equals(effectName, CfgEffectNameHare.Value, StringComparison.OrdinalIgnoreCase))
                 cfgType = _cfgTypeHare;
-            else if (string.Equals(effectName, _cfgEffectNameDverger?.Value, StringComparison.OrdinalIgnoreCase))
+            else if (CfgEffectNameDverger != null && string.Equals(effectName, CfgEffectNameDverger.Value, StringComparison.OrdinalIgnoreCase))
                 cfgType = _cfgTypeDverger;
 
             if (cfgType == null)
@@ -342,7 +306,7 @@ namespace SoulcatcherCrossbowFix
 
                 float v = ExtractFirstFloat(cfgType, cfgObj);
 
-                if (_cfgDebug?.Value == true && _cfgDebugDumpDiscovery?.Value == true)
+                if (CfgDebug != null && CfgDebug.Value && CfgDebugDumpDiscovery != null && CfgDebugDumpDiscovery.Value)
                     LogInfo($"[JC] Effect '{effectName}' cfgType='{cfgType.FullName}' value={v:0.###}");
 
                 return v;
@@ -378,63 +342,78 @@ namespace SoulcatcherCrossbowFix
             return 0f;
         }
 
-        private static void ResolveJewelcraftingBindings()
+        private static void ResolveJewelcraftingBindings(bool force)
         {
-            if (_resolved) return;
-            _resolved = true;
+            if (!force)
+            {
+                if (Time.time < _nextResolveAttemptTime) return;
+                _nextResolveAttemptTime = Time.time + 1.0f;
+            }
+
+            bool haveMethod = _miGetEffectPowerGenericDef != null;
+            bool haveTypes = _cfgTypeHare != null && _cfgTypeDverger != null;
+            if (haveMethod && haveTypes) return;
 
             try
             {
-                var asms = AppDomain.CurrentDomain.GetAssemblies();
-
-                IEnumerable<Assembly> ordered = asms
-                    .OrderByDescending(a => (a.GetName().Name ?? "").IndexOf("Jewelcrafting", StringComparison.OrdinalIgnoreCase) >= 0);
-
-                foreach (var asm in ordered)
+                if (_miGetEffectPowerGenericDef == null)
                 {
-                    Type[] types;
-                    try { types = asm.GetTypes(); } catch { continue; }
-
-                    foreach (var t in types)
+                    var asms = AppDomain.CurrentDomain.GetAssemblies();
+                    foreach (var asm in asms)
                     {
-                        if (t == null) continue;
+                        Type[] types;
+                        try { types = asm.GetTypes(); } catch { continue; }
 
-                        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                        foreach (var m in methods)
+                        for (int ti = 0; ti < types.Length; ti++)
                         {
-                            if (m.Name != "GetEffectPower") continue;
-                            if (!m.IsGenericMethodDefinition) continue;
+                            var t = types[ti];
+                            if (t == null) continue;
 
-                            var ps = m.GetParameters();
-                            if (ps.Length != 2) continue;
-                            if (ps[0].ParameterType != typeof(Player)) continue;
-                            if (ps[1].ParameterType != typeof(string)) continue;
+                            var methods = t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                            for (int mi = 0; mi < methods.Length; mi++)
+                            {
+                                var m = methods[mi];
+                                if (m == null) continue;
+                                if (m.Name != "GetEffectPower") continue;
+                                if (!m.IsGenericMethodDefinition) continue;
 
-                            _miGetEffectPowerGenericDef = m;
-                            goto FoundMethod;
+                                var ps = m.GetParameters();
+                                if (ps.Length != 2) continue;
+                                if (ps[0].ParameterType != typeof(Player)) continue;
+                                if (ps[1].ParameterType != typeof(string)) continue;
+
+                                _miGetEffectPowerGenericDef = m;
+                                break;
+                            }
+
+                            if (_miGetEffectPowerGenericDef != null) break;
                         }
-                    }
-                }
-            FoundMethod: ;
 
-                if (_cfgDebug?.Value == true && _cfgDebugDumpDiscovery?.Value == true)
-                {
-                    LogInfo(_miGetEffectPowerGenericDef != null
-                        ? $"[DISCOVERY] Found GetEffectPower<T>: {_miGetEffectPowerGenericDef.DeclaringType?.FullName}::{_miGetEffectPowerGenericDef.Name}"
-                        : "[DISCOVERY] GetEffectPower<T> not found.");
+                        if (_miGetEffectPowerGenericDef != null) break;
+                    }
+
+                    if (CfgDebug != null && CfgDebug.Value && CfgDebugDumpDiscovery != null && CfgDebugDumpDiscovery.Value)
+                    {
+                        LogInfo(_miGetEffectPowerGenericDef != null
+                            ? $"[DISCOVERY] Found GetEffectPower<T>: {_miGetEffectPowerGenericDef.DeclaringType?.FullName}::{_miGetEffectPowerGenericDef.Name}"
+                            : "[DISCOVERY] GetEffectPower<T> not found (yet).");
+                    }
                 }
             }
             catch (Exception e)
             {
-                if (_cfgDebug?.Value == true) LogError($"[DISCOVERY] GetEffectPower<T> search failed: {e}");
+                if (CfgDebug != null && CfgDebug.Value) LogError($"[DISCOVERY] GetEffectPower<T> search failed: {e}");
             }
 
             try
             {
-                _cfgTypeHare = FindConfigTypeByFragments(new[] { "Hare", "Soul", "Power" });
-                _cfgTypeDverger = FindConfigTypeByFragments(new[] { "Dver", "Soul", "Power" });
+                if (_cfgTypeHare == null)
+                    _cfgTypeHare = FindTypeByFragments(new[] { "Hare", "Soul", "Power" });
 
-                if (_cfgDebug?.Value == true && _cfgDebugDumpDiscovery?.Value == true)
+                if (_cfgTypeDverger == null)
+                    _cfgTypeDverger = FindTypeByFragments(new[] { "Dver", "Soul", "Power" });
+
+                if (CfgDebug != null && CfgDebug.Value && CfgDebugDumpDiscovery != null && CfgDebugDumpDiscovery.Value)
                 {
                     LogInfo($"[DISCOVERY] Hare cfgType: {_cfgTypeHare?.FullName ?? "NOT FOUND"}");
                     LogInfo($"[DISCOVERY] Dverger cfgType: {_cfgTypeDverger?.FullName ?? "NOT FOUND"}");
@@ -442,16 +421,22 @@ namespace SoulcatcherCrossbowFix
             }
             catch (Exception e)
             {
-                if (_cfgDebug?.Value == true) LogError($"[DISCOVERY] Config type search failed: {e}");
+                if (CfgDebug != null && CfgDebug.Value) LogError($"[DISCOVERY] Config type search failed: {e}");
             }
         }
 
-        private static Type FindConfigTypeByFragments(string[] fragments)
+        private static Type FindTypeByFragments(string[] fragments)
         {
             var asms = AppDomain.CurrentDomain.GetAssemblies();
 
-            IEnumerable<Assembly> ordered = asms
-                .OrderByDescending(a => (a.GetName().Name ?? "").IndexOf("Soulcatcher", StringComparison.OrdinalIgnoreCase) >= 0);
+            var ordered = asms.OrderByDescending(a =>
+            {
+                string n = a.GetName().Name ?? "";
+                int score = 0;
+                if (n.IndexOf("Soulcatcher", StringComparison.OrdinalIgnoreCase) >= 0) score += 2;
+                if (n.IndexOf("Jewelcrafting", StringComparison.OrdinalIgnoreCase) >= 0) score += 1;
+                return score;
+            });
 
             foreach (var asm in ordered)
             {
@@ -460,14 +445,14 @@ namespace SoulcatcherCrossbowFix
 
                 foreach (var t in types)
                 {
-                    if (t?.FullName == null) continue;
-
-                    if (!string.Equals(t.Name, "Config", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (t == null) continue;
+                    string fn = t.FullName;
+                    if (string.IsNullOrEmpty(fn)) continue;
 
                     bool ok = true;
                     for (int i = 0; i < fragments.Length; i++)
                     {
-                        if (t.FullName.IndexOf(fragments[i], StringComparison.OrdinalIgnoreCase) < 0)
+                        if (fn.IndexOf(fragments[i], StringComparison.OrdinalIgnoreCase) < 0)
                         {
                             ok = false;
                             break;
@@ -475,30 +460,37 @@ namespace SoulcatcherCrossbowFix
                     }
                     if (!ok) continue;
 
+                    bool hasFloat =
+                        t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance).Any(f => f.FieldType == typeof(float)) ||
+                        t.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance).Any(p => p.PropertyType == typeof(float) && p.GetIndexParameters().Length == 0);
+
+                    if (!hasFloat) continue;
+
                     return t;
                 }
             }
+
             return null;
         }
 
-        // ---------------- DEBUG LOGGING ----------------
+        // ---------------- LOGGING ----------------
         private static void LogInfo(string msg)
         {
-            try { BepInEx.Logging.Logger.CreateLogSource("SoulcatcherCrossbowFix").LogInfo(msg); }
+            try { Log?.LogInfo(msg); }
             catch { Debug.Log(msg); }
         }
 
         private static void LogError(string msg)
         {
-            try { BepInEx.Logging.Logger.CreateLogSource("SoulcatcherCrossbowFix").LogError(msg); }
+            try { Log?.LogError(msg); }
             catch { Debug.LogError(msg); }
         }
 
         private static void DebugLogRate(string msg)
         {
-            if (_cfgDebug == null || !_cfgDebug.Value) return;
+            if (CfgDebug == null || !CfgDebug.Value) return;
 
-            float min = _cfgDebugMinIntervalSec != null ? Mathf.Max(0.05f, _cfgDebugMinIntervalSec.Value) : 0.5f;
+            float min = CfgDebugMinIntervalSec != null ? Mathf.Max(0.05f, CfgDebugMinIntervalSec.Value) : 0.5f;
             if (Time.time < _nextLogTime) return;
 
             _nextLogTime = Time.time + min;
@@ -507,11 +499,11 @@ namespace SoulcatcherCrossbowFix
 
         private static void DebugDumpWeaponCustomDataRate(ItemDrop.ItemData weapon)
         {
-            if (_cfgDebug == null || !_cfgDebug.Value) return;
-            if (_cfgDebugDumpWeaponCustomData == null || !_cfgDebugDumpWeaponCustomData.Value) return;
+            if (CfgDebug == null || !CfgDebug.Value) return;
+            if (CfgDebugDumpWeaponCustomData == null || !CfgDebugDumpWeaponCustomData.Value) return;
             if (weapon == null) return;
 
-            float min = _cfgDebugMinIntervalSec != null ? Mathf.Max(0.05f, _cfgDebugMinIntervalSec.Value) : 0.5f;
+            float min = CfgDebugMinIntervalSec != null ? Mathf.Max(0.05f, CfgDebugMinIntervalSec.Value) : 0.5f;
             if (Time.time < _nextLogTime) return;
 
             if (weapon.m_customData == null || weapon.m_customData.Count == 0)
